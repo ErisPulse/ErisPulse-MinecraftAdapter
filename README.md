@@ -1,30 +1,50 @@
-# ErisPulse MinecraftAdapter
+[English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md) | [Русский](README.ru.md)
 
-**Minecraft RCON 适配器 —— 命令执行、say/tellraw 发送、日志事件监听。**
+<div align="center">
 
-## 特性
+<img src="https://raw.githubusercontent.com/ErisPulse/ErisPulse/main/.github/assets/ErisPulseLogo.png" width="180" alt="ErisPulse-MinecraftAdapter" />
 
-- **RCON 全量命令面**：任意命令执行（`Api.exec`）、类型化方法（玩家列表/状态）
-- **消息发送**：`.Text()` → 单人 `tellraw`（`To("user", player)`）或全服 `say`（`To("server", ...)`）
-- **日志事件监听**（可选）：tail `server.log`，聊天 → message 事件、加入/退出 → notice 事件，零插件依赖
-- **多服务器**：`accounts` 下每个账户一台服务器，断线自动指数重连 + 保活
-- **RCON 协议自实现**：零第三方依赖
+# ErisPulse-MinecraftAdapter
 
-## 安装
+**ErisPulse Minecraft adapter — RCON commands, messaging & log events**
+
+<p>
+  <a href="https://pypi.org/project/ErisPulse-MinecraftAdapter/"><img src="https://img.shields.io/pypi/v/ErisPulse-MinecraftAdapter?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ErisPulse-MinecraftAdapter/"><img src="https://img.shields.io/badge/Python-3.10+-FFD43B?style=for-the-badge&logo=python&logoColor=blue" alt="Python"></a>
+  <a href="https://github.com/ErisPulse/ErisPulse-MinecraftAdapter/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"></a>
+  <img src="https://raw.githubusercontent.com/ErisPulse/.github/main/assets/badges/adapter.svg" alt="ErisPulse">
+</p>
+
+</div>
+
+---
+
+## Introduction
+
+MinecraftAdapter is a Minecraft Java Edition server adapter built on the RCON protocol. It executes commands, sends in-game messages, and (optionally) tails the server log to expose chat / join / leave events as standard events.
+
+**Highlights:**
+- **Full RCON command surface**: any command via `Api.exec()`, typed helpers for player list & status
+- **Messaging**: `tellraw` to individual players (`To("user", player)`), `say` broadcast (`To("server", ...)`)
+- **Optional log tail**: chat → message events, join/leave → notice events (zero plugin dependency)
+- **Multi-server**: each account is one server, auto-reconnect with exponential backoff + keepalive
+- **Zero third-party deps**: RCON protocol implemented in-tree (~150 lines)
+
+## Installation
 
 ```bash
 epsdk install MinecraftAdapter
 ```
 
-或：
+or:
 
 ```bash
 pip install ErisPulse-MinecraftAdapter
 ```
 
-## 服务器前置配置
+## Server Prerequisites
 
-在 `server.properties` 中启用 RCON：
+Enable RCON in `server.properties`:
 
 ```properties
 enable-rcon=true
@@ -32,53 +52,97 @@ rcon.port=25575
 rcon.password=your_rcon_password
 ```
 
-## 配置
+## Configuration
 
 ```toml
 [MinecraftAdapter.accounts.default]
-host = "127.0.0.1"
-port = 25575
+host = "127.0.0.1"             # RCON server address
+port = 25575                   # RCON port (rcon.port)
 password = "your_rcon_password"
-bot_id = ""                    # 留空默认为账户名
-enable_log_tail = false        # 启用日志监听（聊天/加入/退出事件）
-log_path = "logs/latest.log"   # 日志文件（与本机服务器同机或已挂载）
-poll_interval = 1.0            # 日志扫描间隔（秒）
+bot_id = ""                    # optional, defaults to account name
+enable_log_tail = false        # enable log tailing (chat/join/leave events)
+log_path = "logs/latest.log"   # log file path (same machine or mounted)
+poll_interval = 1.0            # log scan interval (seconds)
 enabled = true
 ```
 
-## 使用
+**Configuration notes (per account):**
+- `host` / `port` / `password`: RCON endpoint (required)
+- `bot_id`: bot identity in events (defaults to account name)
+- `enable_log_tail` / `log_path` / `poll_interval`: event source via server log; requires the adapter to run on the same machine as the server (or the log directory mounted)
+
+## Usage
+
+### Messaging
 
 ```python
 from ErisPulse import sdk
 mc = sdk.adapter.get("minecraft")
 
-# 发送消息
-await mc.Send.To("user", "Steve").Text("你好 Steve")     # tellraw 单人
-await mc.Send.To("server", "myserver").Text("服务器广播")  # say 全服
+# Direct message to a player (tellraw)
+await mc.Send.To("user", "Steve").Text("Hello Steve")
 
-# 玩家列表
-r = await mc.Api.get_player_list()
-print(r["data"]["players"])
+# Broadcast to the whole server (say)
+await mc.Send.To("server", "myserver").Text("Server broadcast")
 
-# 任意命令
-r = await mc.Api.exec("whitelist add Alex")
-print(r["data"]["command_output"])
+# Mentions are rendered inline
+await mc.Send.To("server", "myserver").At("Steve").Text(" check this out")
 
-# 接收游戏内聊天/加入事件（enable_log_tail = true 时）
-@sdk.adapter.on_message()
-async def on_msg(event):
-    if event["platform"] == "minecraft":
-        print(f"[MC] {event['user_id']}: {event['alt_message']}")
+# Multi-server
+await mc.Send.Using("server2").To("server", "s2").Text("From the second server")
 ```
 
-## ⚠️ 能力边界（RCON 协议限制）
+### Standard API actions
 
-- **RCON 无法接收聊天事件**——这是协议本身的限制（纯请求-响应，服务器不推送）。事件接收依赖日志监听：
-  - 适配器与服务器**同机部署**或日志目录已挂载（`enable_log_tail + log_path`）
-  - 日志格式依赖 vanilla/主流服务端（Paper/Fabric 等）默认格式；自定义日志插件格式可能解析不到
-- 需要完整的双向聊天桥接？推荐搭配服务端插件（WebSocket/HTTP 推送类）将聊天事件转发到 ErisPulse `WebhookAdapter`
-- `say` 命令的回显会进日志，适配器已做回环去重
+```python
+r = await mc.Api.get_player_list()      # {"players": ["Steve", "Alex"], "raw": "..."}
+r = await mc.Api.get_status()           # {"status": "ok", "connected": true}
+r = await mc.Api.get_self_info()        # server identity
+r = await mc.Api.exec("whitelist add Alex")   # any RCON command
 
-## License
+# Multi-server
+r = await mc.Api.Using("server2").exec("time set day")
+```
 
-MIT
+### Event listening (requires `enable_log_tail = true`)
+
+```python
+@sdk.adapter.on_message()
+async def on_chat(event):
+    if event["platform"] == "minecraft":
+        # event["detail_type"] == "server"
+        print(f"[MC] {event['user_id']}: {event['alt_message']}")
+
+@sdk.adapter.on("notice")
+async def on_notice(event):
+    if event["platform"] == "minecraft":
+        if event["detail_type"] == "server_joined":
+            print(f"{event['user_id']} joined")
+        elif event["detail_type"] == "server_left":
+            print(f"{event['user_id']} left")
+```
+
+## Platform event mapping
+
+| Server log line | Adapter event |
+|-----------------|---------------|
+| `<Steve> hello` | message (`detail_type: server`) |
+| `Steve joined the game` | notice (`detail_type: server_joined`) |
+| `Steve left the game` | notice (`detail_type: server_left`) |
+
+Raw log lines are preserved in `minecraft_raw.line`.
+
+## Important notes:
+1. **RCON cannot receive chat events** — this is a protocol limitation (pure request/response). Event receiving relies on log tailing
+2. Log tailing requires the adapter to run on the same machine as the server, or the log directory mounted
+3. Log format depends on vanilla / mainstream server software (Paper, Fabric, etc.); custom log plugins may not be parsed
+4. `say` / `tellraw` echoes appear in the log — the adapter deduplicates them automatically
+5. Only `text` segments are supported (tellraw plain text); media segments return a descriptive error
+6. For full two-way bridging, pair a server-side WebSocket/HTTP forwarding plugin with the ErisPulse `WebhookAdapter`
+
+---
+
+### Reference links
+- [ErisPulse main repository](https://github.com/ErisPulse/ErisPulse/)
+- [Minecraft RCON protocol](https://wiki.vg/RCON)
+- [Module development guide](https://www.erisdev.com/#docs/developer-guide/README.md)
