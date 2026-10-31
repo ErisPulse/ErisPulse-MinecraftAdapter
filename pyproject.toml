@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ErisPulse-MinecraftAdapter"
+version = "0.1.0"
+description = "ErisPulse Minecraft RCON 适配器 — 命令执行、say/tellraw 发送、日志事件监听"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "ErisPulse>=2.7.1",
+]
+
+[project.entry-points."erispulse.adapter"]
+minecraft = "MinecraftAdapter:MinecraftAdapter"
+
+[tool.setuptools.packages.find]
+include = ["MinecraftAdapter"]
