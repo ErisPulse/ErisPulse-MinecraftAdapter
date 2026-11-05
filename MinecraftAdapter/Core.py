@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import struct
@@ -14,9 +15,42 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
+
+
+def _forward_node_text(node: Dict) -> str:
+    """提取合并转发节点 content 中全部 text 段文本（段间直接连接）"""
+    data = node.get("data") or {}
+    return "".join(
+        str(seg.get("data", {}).get("text") or "")
+        for seg in (data.get("content") or [])
+        if isinstance(seg, dict) and seg.get("type") == "text"
+    )
+
+
+def _forward_nodes_plain(nodes, separator: str = "\n") -> str:
+    """合并转发节点降级纯文本：每条「昵称: 正文」（Minecraft 无富文本能力）"""
+    lines = []
+    for node in nodes if isinstance(nodes, list) else [nodes]:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") or {}
+        nickname = str(data.get("nickname") or "").strip()
+        text = _forward_node_text(node).strip()
+        if nickname and text:
+            lines.append(f"{nickname}: {text}")
+        elif text:
+            lines.append(text)
+    return separator.join(lines)
+
+
+def _escape_mc_say(text: str) -> str:
+    """say 命令文本转义：反斜杠翻倍，换行替换为空格"""
+    escaped = str(text).replace("\\", "\\\\")
+    escaped = escaped.replace("\r", " ").replace("\n", " ")
+    return escaped
 
 
 def _parse_version(version_str: str):
@@ -362,11 +396,15 @@ class MinecraftAdapter(BaseAdapter):
                 return self.make_error(retcode=10002, message="空消息（Minecraft 仅支持 text 段）")
             try:
                 if target_type == "user":
-                    out = await rt.rcon.exec(f'tellraw {target_id} {{"text":"{texts}"}}')
+                    if re.search(r'[\s"\'\\]', target_id):
+                        return self.make_error(retcode=10002, message="target_id 含非法字符（空白/引号/反斜杠）")
+                    component = json.dumps({"text": texts}, ensure_ascii=False)
+                    out = await rt.rcon.exec(f"tellraw {target_id} {component}")
                     rt.remember_echo(f"tellraw:{target_id}:{texts}")
                 else:
-                    out = await rt.rcon.exec(f"say {texts}")
-                    rt.remember_echo(f"say:{rt.bot_id}:{texts}")
+                    safe_text = _escape_mc_say(texts)
+                    out = await rt.rcon.exec(f"say {safe_text}")
+                    rt.remember_echo(f"say:{rt.bot_id}:{safe_text}")
                 return self.make_response(data={"command_output": out}, message_id=str(uuid.uuid4()))
             except RconError as e:
                 return self.make_error(retcode=33001, message=str(e))
@@ -520,18 +558,35 @@ class MinecraftAdapter(BaseAdapter):
                 if rt.rcon is None or not rt.rcon.connected:
                     return adapter.make_error(retcode=33001, message="RCON 未连接")
 
-                texts, unsupported = [], []
-                for seg in self._apply_modifiers(message):
-                    stype = seg.get("type")
-                    data = seg.get("data", {}) or {}
-                    if stype == "text":
-                        texts.append(str(data.get("text", "")))
-                    elif stype == "mention":
-                        texts.append(str(data.get("user_id", "")))
-                    elif stype in ("image", "audio", "video", "file"):
-                        unsupported.append(stype)
-                    elif stype == "reply":
-                        continue
+                segments = self._apply_modifiers(message)
+                # 纯 node 列表整体转为「昵称: 正文」文本；混合列表中 node 文本并入 texts
+                if segments and all(
+                    isinstance(seg, dict) and seg.get("type") == "node"
+                    for seg in segments
+                ):
+                    texts, unsupported = [_forward_nodes_plain(segments)], []
+                else:
+                    texts, unsupported = [], []
+                    for seg in segments:
+                        stype = seg.get("type")
+                        data = seg.get("data", {}) or {}
+                        if stype == "text":
+                            texts.append(str(data.get("text", "")))
+                        elif stype == "mention":
+                            texts.append(str(data.get("user_id", "")))
+                        elif stype == "node":
+                            texts.append(_forward_nodes_plain(seg))
+                        elif stype in ("image", "audio", "video", "file"):
+                            unsupported.append(stype)
+                        elif stype == "reply":
+                            adapter.logger.debug("Minecraft 跳过 reply 段")
+                        elif stype == "mention_all":
+                            adapter.logger.warning("Minecraft 不支持 mention_all 段，已跳过")
+                        elif isinstance(stype, str) and stype.startswith("minecraft_"):
+                            adapter.logger.warning(f"Minecraft 扩展段不支持发送，已跳过: {stype}")
+                        else:
+                            adapter.logger.warning(f"Minecraft 未知段类型已跳过: {stype}")
+
                 content = "".join(texts).strip()
                 if not content:
                     return adapter.make_error(
@@ -539,16 +594,25 @@ class MinecraftAdapter(BaseAdapter):
                         message="Minecraft 仅支持 text 段"
                         + (f"（收到不支持段: {unsupported}）" if unsupported else "，且消息为空"),
                     )
+                if unsupported:
+                    adapter.logger.warning(f"Minecraft 不支持的段已丢弃: {unsupported}")
 
                 target_type = ctx.get("target_type") or "server"
                 target_id = str(ctx.get("target_id") or "")
                 try:
                     if target_type == "user":
-                        out = await rt.rcon.exec(f'tellraw {target_id} {{"text":"{content}"}}')
+                        if re.search(r'[\s"\'\\]', target_id):
+                            return adapter.make_error(
+                                retcode=10002,
+                                message="target_id 含非法字符（空白/引号/反斜杠）",
+                            )
+                        component = json.dumps({"text": content}, ensure_ascii=False)
+                        out = await rt.rcon.exec(f"tellraw {target_id} {component}")
                         rt.remember_echo(f"tellraw:{target_id}:{content}")
                     elif target_type in ("server", "group"):
-                        out = await rt.rcon.exec(f"say {content}")
-                        rt.remember_echo(f"say:{rt.bot_id}:{content}")
+                        safe_text = _escape_mc_say(content)
+                        out = await rt.rcon.exec(f"say {safe_text}")
+                        rt.remember_echo(f"say:{rt.bot_id}:{safe_text}")
                     else:
                         return adapter.make_error(
                             retcode=10003,
@@ -557,6 +621,7 @@ class MinecraftAdapter(BaseAdapter):
                     return adapter.make_response(
                         data={"command_output": out},
                         message_id=str(uuid.uuid4()),
+                        message=f"已跳过不支持的段: {', '.join(unsupported)}" if unsupported else "",
                         raw={"output": out},
                     )
                 except RconError as e:

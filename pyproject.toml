@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ErisPulse-MinecraftAdapter"
-version = "0.1.0"
+version = "0.1.1"
 description = "ErisPulse Minecraft RCON 适配器 — 命令执行、say/tellraw 发送、日志事件监听"
 readme = "README.md"
 license = { text = "MIT" }
