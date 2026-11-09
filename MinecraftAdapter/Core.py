@@ -15,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
 
@@ -382,7 +382,9 @@ class MinecraftAdapter(BaseAdapter):
 
     async def call_api(self, endpoint: str, _account_id: Optional[str] = None, **params):
         """API 动作统一入口（send_message / get_player_list / exec）"""
-        rt = self._runtimes.get(_account_id) if _account_id else next(iter(self._runtimes.values()), None)
+        # 标准字段 account_id 与旧名 _account_id 双兼容（ApiDSL.Using 传标准名）
+        account_id = params.pop("account_id", None) or _account_id
+        rt = self._runtimes.get(account_id) if account_id else next(iter(self._runtimes.values()), None)
         if rt is None:
             return self.make_error(retcode=10003, message="账户不存在")
         if rt.rcon is None or not rt.rcon.connected:
@@ -408,14 +410,14 @@ class MinecraftAdapter(BaseAdapter):
                 return self.make_response(data={"command_output": out}, message_id=str(uuid.uuid4()))
             except RconError as e:
                 return self.make_error(retcode=33001, message=str(e))
-        if endpoint == "get_player_list":
+        if endpoint in ("get_player_list", "minecraft.get_player_list"):
             out = await rt.rcon.exec("list")
             players = []
             m = re.search(r"players online:\s*(.*)$", out)
             if m and m.group(1):
                 players = [p.strip() for p in m.group(1).split(",") if p.strip()]
             return self.make_response(data={"players": players, "raw": out})
-        if endpoint == "exec":
+        if endpoint in ("exec", "minecraft.exec"):
             try:
                 out = await rt.rcon.exec(str(params.get("command", "")))
                 return self.make_response(data={"command_output": out})
@@ -504,15 +506,16 @@ class MinecraftAdapter(BaseAdapter):
             return
         m = self._JOIN_RE.match(line)
         if m:
-            self._emit_log_event(rt, "notice", "server_joined", m.group(1), "", line=line, operator_id=m.group(1))
+            self._emit_log_event(rt, "notice", "group_member_increase", m.group(1), "", line=line, operator_id=m.group(1), sub_type="server_joined")
             return
         m = self._LEFT_RE.match(line)
         if m:
-            self._emit_log_event(rt, "notice", "server_left", m.group(1), "", line=line, operator_id=m.group(1))
+            self._emit_log_event(rt, "notice", "group_member_decrease", m.group(1), "", line=line, operator_id=m.group(1), sub_type="server_left")
 
     def _emit_log_event(
         self, rt: _AccountRuntime, etype: str, detail_type: str,
         user_id: str, text: str, line: str = "", operator_id: str = None,
+        sub_type: str = "",
     ):
         ev = {
             "id": str(uuid.uuid4()),
@@ -530,7 +533,10 @@ class MinecraftAdapter(BaseAdapter):
             "minecraft_raw": {"line": line},
             "minecraft_raw_type": "log_line",
         }
+        if sub_type:
+            ev["sub_type"] = sub_type
         if etype == "message":
+            ev["message_id"] = str(uuid.uuid4())
             ev["message"] = [{"type": "text", "data": {"text": text}}]
             ev["alt_message"] = text
         if operator_id is not None:
@@ -636,7 +642,7 @@ class MinecraftAdapter(BaseAdapter):
 
         async def _rt(self):
             ad = self._adapter
-            name = getattr(self, "_api_account_id", None)
+            name = self._account_id or self.api_context.get("account_id")
             return ad._runtimes.get(name) if name else next(iter(ad._runtimes.values()), None)
 
         async def get_status(self) -> dict:
@@ -653,6 +659,7 @@ class MinecraftAdapter(BaseAdapter):
                 data={
                     "user_id": rt.bot_id,
                     "user_name": rt.name,
+                    "user_displayname": rt.name,
                     "host": f"{rt.config.host}:{rt.config.port}",
                 }
             )
@@ -660,16 +667,21 @@ class MinecraftAdapter(BaseAdapter):
         async def get_version(self) -> dict:
             from . import __version__
 
-            return self._adapter.make_response(data={"version": __version__})
+            return self._adapter.make_response(
+                data={
+                    "impl": "ErisPulse-MinecraftAdapter",
+                    "version": __version__,
+                    "onebot_version": "12",
+                }
+            )
 
         async def get_supported_actions(self) -> dict:
             return self._adapter.make_response(
-                data={
-                    "actions": [
-                        "get_self_info", "get_status", "get_version",
-                        "get_supported_actions", "get_player_list", "exec",
-                    ]
-                }
+                data=[
+                    "get_self_info", "get_status", "get_version",
+                    "get_supported_actions", "get_player_list", "exec",
+                    "minecraft.get_player_list", "minecraft.exec",
+                ]
             )
 
         async def get_player_list(self) -> dict:
